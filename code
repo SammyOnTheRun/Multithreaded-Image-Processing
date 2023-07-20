@@ -1,0 +1,152 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <string.h>
+#include <jpeglib.h>
+
+#define MAX_THREADS 4
+
+typedef struct {
+    int width;
+    int height;
+    uint8_t* data;
+} Image;
+
+Image* read_jpeg_file(const char* filename) {
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    FILE* infile;
+    JSAMPARRAY buffer;
+    int row_stride;
+
+    if ((infile = fopen(filename, "rb")) == NULL) {
+        fprintf(stderr, "Can't open %s\n", filename);
+        return NULL;
+    }
+
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, infile);
+    jpeg_read_header(&cinfo, TRUE);
+    jpeg_start_decompress(&cinfo);
+
+    Image* image = (Image*) malloc(sizeof(Image));
+    image->width = cinfo.output_width;
+    image->height = cinfo.output_height;
+    image->data = (uint8_t*) malloc(image->width * image->height * cinfo.num_components);
+
+    row_stride = image->width * cinfo.num_components;
+    buffer = (*cinfo.mem->alloc_sarray)((j_common_ptr) &cinfo, JPOOL_IMAGE, row_stride, 1);
+
+    uint8_t* ptr = image->data;
+    while (cinfo.output_scanline < cinfo.output_height) {
+        jpeg_read_scanlines(&cinfo, buffer, 1);
+        memcpy(ptr, buffer[0], row_stride);
+        ptr += row_stride;
+    }
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    fclose(infile);
+
+    return image;
+}
+
+void write_jpeg_file(const char* filename, Image* image) {
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    FILE* outfile;
+    JSAMPROW row_pointer[1];
+    int row_stride;
+
+    if ((outfile = fopen(filename, "wb")) == NULL) {
+        fprintf(stderr, "Can't open %s\n", filename);
+        return;
+    }
+
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, outfile);
+
+    cinfo.image_width = image->width;
+    cinfo.image_height = image->height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+    jpeg_start_compress(&cinfo, TRUE);
+
+    row_stride = image->width * 3;
+    uint8_t* ptr = image->data;
+    while (cinfo.next_scanline < cinfo.image_height) {
+        row_pointer[0] = &ptr[cinfo.next_scanline * row_stride];
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    fclose(outfile);
+}
+
+void* process_image(void* arg) {
+    Image* image = (Image*) arg;
+
+    // Perform image processing operations here
+    // For example, blur the image
+    for (int i = 1; i < image->height - 1; i++) {
+        for (int j = 1; j < image->width - 1; j++) {
+            int r = 0, g = 0, b = 0;
+            for (int k = -1; k <= 1; k++) {
+                for (int l =-1; l <= 1; l++) {
+                    r += image->data[((i + k) * image->width + (j + l)) * 3 + 0];
+                    g += image->data[((i + k) * image->width + (j + l)) * 3 + 1];
+                    b += image->data[((i + k) * image->width + (j + l)) * 3 + 2];
+                }
+             }
+             image->data[(i * image->width + j) * 3 + 0] = r / 9;
+             image->data[(i * image->width + j) * 3 + 1] = g / 9;
+             image->data[(i * image->width + j) * 3 + 2] = b / 9;
+        }
+     }
+     pthread_exit(NULL);
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <input file>\n", argv[0]);
+        return 1;
+    }
+    Image* image = read_jpeg_file(argv[1]);
+    if (image == NULL) {
+        fprintf(stderr, "Failed to read input file %s\n", argv[1]);
+        return 1;
+    }
+
+    pthread_t threads[MAX_THREADS];
+    int rc;
+
+    // Spawn threads to process the image
+    for (int i = 0; i < MAX_THREADS; i++) {
+        rc = pthread_create(&threads[i], NULL, process_image, (void*) image);
+        if (rc) {
+            fprintf(stderr, "Error: failed to create thread %d\n", i);
+            return 1;
+        }
+    }
+
+    // Wait for threads to finish
+    for (int i = 0; i < MAX_THREADS; i++) {
+        rc = pthread_join(threads[i], NULL);
+        if (rc) {
+             fprintf(stderr, "Error: failed to join thread %d\n", i);
+             return 1;
+        }
+    }
+
+    write_jpeg_file("output.jpg", image);
+
+    free(image->data);
+    free(image);
+
+    return 0;
+}
